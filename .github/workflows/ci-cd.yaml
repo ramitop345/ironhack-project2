@@ -121,11 +121,11 @@ jobs:
         run: |
           kubectl apply \
             --dry-run=client \
-            -f K8s/
+            -f ../../K8s/
 
       - name: Apply Kubernetes resources
         run: |
-          kubectl apply -f K8s/
+          kubectl apply -f ../../K8s/
 
       - name: Deploy new application images
         env:
