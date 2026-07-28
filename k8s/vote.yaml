@@ -70,7 +70,7 @@ metadata:
   labels:
     app: vote
 spec:
-  type: ClusterIP
+  type: LoadBalancer
 
   selector:
     app: vote
