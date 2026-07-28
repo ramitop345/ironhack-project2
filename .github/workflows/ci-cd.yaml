@@ -8,7 +8,7 @@ on:
       - "vote/**"
       - "result/**"
       - "worker/**"
-      - "K8s/**"
+      - "k8s/**"
       - ".github/workflows/ci-cd.yaml"
 
   workflow_dispatch:
@@ -121,11 +121,11 @@ jobs:
         run: |
           kubectl apply \
             --dry-run=client \
-            -f ../../k8s/
+            -f k8s/
 
       - name: Apply Kubernetes resources
         run: |
-          kubectl apply -f ../../k8s/
+          kubectl apply -f k8s/
 
       - name: Deploy new application images
         env:
