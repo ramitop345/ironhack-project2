@@ -1,0 +1,167 @@
+name: Voting App CI/CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "vote/**"
+      - "result/**"
+      - "worker/**"
+      - "K8s/**"
+      - ".github/workflows/ci-cd.yaml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: eks-ramses
+  KUBERNETES_NAMESPACE: voting-app
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+
+jobs:
+  build-and-push:
+    name: Build and push images
+    runs-on: ubuntu-latest
+
+    outputs:
+      image_tag: ${{ steps.image-tag.outputs.value }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Generate image tag
+        id: image-tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "value=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push vote image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./vote
+          file: ./vote/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/vote:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/vote:latest
+          cache-from: type=gha,scope=vote
+          cache-to: type=gha,mode=max,scope=vote
+
+      - name: Build and push result image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./result
+          file: ./result/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/result:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/result:latest
+          cache-from: type=gha,scope=result
+          cache-to: type=gha,mode=max,scope=result
+
+      - name: Build and push worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./worker
+          file: ./worker/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/worker:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/worker:latest
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+  deploy:
+    name: Deploy to Amazon EKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${EKS_CLUSTER_NAME}"
+
+      - name: Verify cluster connection
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
+          kubectl get namespace "${KUBERNETES_NAMESPACE}"
+
+      - name: Validate Kubernetes manifests
+        run: |
+          kubectl apply \
+            --dry-run=client \
+            -f K8s/
+
+      - name: Apply Kubernetes resources
+        run: |
+          kubectl apply -f K8s/
+
+      - name: Deploy new application images
+        env:
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          kubectl set image deployment/vote \
+            vote="${DOCKERHUB_USERNAME}/vote:${IMAGE_TAG}" \
+            --namespace "${KUBERNETES_NAMESPACE}"
+
+          kubectl set image deployment/result \
+            result="${DOCKERHUB_USERNAME}/result:${IMAGE_TAG}" \
+            --namespace "${KUBERNETES_NAMESPACE}"
+
+          kubectl set image deployment/worker \
+            worker="${DOCKERHUB_USERNAME}/worker:${IMAGE_TAG}" \
+            --namespace "${KUBERNETES_NAMESPACE}"
+
+      - name: Wait for rollouts
+        run: |
+          kubectl rollout status deployment/vote \
+            --namespace "${KUBERNETES_NAMESPACE}" \
+            --timeout=5m
+
+          kubectl rollout status deployment/result \
+            --namespace "${KUBERNETES_NAMESPACE}" \
+            --timeout=5m
+
+          kubectl rollout status deployment/worker \
+            --namespace "${KUBERNETES_NAMESPACE}" \
+            --timeout=5m
+
+      - name: Display deployed resources
+        if: always()
+        run: |
+          kubectl get deployments,pods,services \
+            --namespace "${KUBERNETES_NAMESPACE}" \
+            -o wide
